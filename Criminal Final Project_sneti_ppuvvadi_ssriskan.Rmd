@@ -1,0 +1,1489 @@
+---
+title: "Predicting Recidivism in Boward County, FL"
+name: "Satvika Neti, Pooja Puvvadi, Sinduja Sriskanda"
+output: html_document
+---
+
+**Team 5: Satvika Neti, Pooja Puvvadi, and Sinduja Sriskanda**
+  **sneti, ppuvvadi, ssriskan**
+
+**1. Introduction **
+
+The use of risk assessments are growing increasingly common in all facets of the legal system nationwide. The objective of this project is to create, evaluate, and validate models that could predict the risk of recidivism within 2 years of a given arrest. The data to build this model will consist of ~60K of criminal charges that was published by ProPublicia. 
+
+
+```{r setup, include=FALSE}
+##### CREATION OF FILE AND DATA CLEANING #####
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(ISLR)
+library(partykit)
+library(caret)
+library(rpart)
+library(randomForest)
+library(pROC)
+library(knitr)
+library(boot)
+library(leaps)
+library(ROCR)
+library(caTools)
+library(MASS)
+library(klaR)
+library(dplyr)
+
+#set working directionary
+setwd("C:\\Users\\satvika\\Documents\\school\\grad\\data mining\\compas-analysis-master")
+
+#open necessary files
+compas.score.raw <- read_csv("compas-scores-raw.csv", col_names = TRUE)
+compas.score.violent <- read_csv("compas-scores-two-years-violent.csv", col_names = TRUE)
+compas.score.two.year <- read_csv("compas-scores-two-years.csv", col_names = TRUE)
+compas.score <- read_csv("compas-scores.csv", col_names = TRUE)
+
+```
+
+**1.1 Data Processing**
+
+**Predictors**
+
+The predictors we chose to focus on to determine likelihood of recidivism are based on the following predictors
+
+- sex
+- age at time of offense
+- race
+- juvenile felony count
+- juvenile misdemeanor count 
+- juvenile other count
+- priors count
+- charge degree
+- length of stay in jail 
+- whether he/she was arrested later on
+
+
+**Age at the time of offense** was calculated based on the person's DoB and one of the following dates:
+
+- Time of Offense
+- Time of Arrest
+
+Based on the data cleaning, the person either has a time indicated by the time the offense transpired or the arrest date. Because of this, we used either one to approximate the age in their arrest record. These ages were used to adjust any age cateogries that were changed based on this new age. 
+
+**Length of stay** was calculated based on the the time in and our of jail measured in Days. If someone has stayed in jail for less than 24 hours, then it would be indicated as 0 days. 
+
+**Decile score** is not included since this score is based on a scale used to determine likelihood of recidivism for COMPAS and would be highly correlated with the demographics we are currently focusing on.
+
+**Charge Degree of O** did not resut in any jail time, and are thereby removed. 
+
+Based off ProPublica's analysis, we also believe not all rows are suitable for analysis. Some rows were removed because of missing data. Additionally, if the charge date of a defendants crime was not within 30 days from when the people was arrested, it is assumed that the right offense canot be guaranteed and to maintain quality of the dataset. 
+
+The data was filtered to include rows of those in two years times were either recidivated or outside of the correctional facility. 
+
+
+### DATA CLEANING FOR GENERAL DATASET
+```{r}
+#df cleaning for all criminals
+subset.score.df <- dplyr::select(compas.score.two.year, sex, dob, age, age_cat, race, c_offense_date, c_arrest_date, juv_fel_count, days_b_screening_arrest, decile_score, juv_misd_count, juv_other_count, priors_count, c_jail_in, c_jail_out,c_charge_degree, is_recid, score_text)
+
+subset.score.df %>%
+  filter(days_b_screening_arrest <= 30) %>%
+  filter(days_b_screening_arrest >= -30) %>% 
+  filter(c_charge_degree != "O") %>%
+  filter(score_text != 'N/A')
+
+#add new column to indicate length of stay in jail
+subset.score.df$stay <- as.numeric(as.Date(subset.score.df$c_jail_out) 
+                                - as.Date(subset.score.df$c_jail_in))
+subset.score.df$stay[is.na(subset.score.df$stay)] = 0
+
+#create age of arrest column 
+subset.score.df$age_offense <- as.numeric(as.Date(subset.score.df$c_offense_date) - as.Date(subset.score.df$dob))
+subset.score.df$age_offense <- round(subset.score.df$age_offense/365)
+
+#change categorphy demographics if needed
+subset.score.df <- mutate(subset.score.df, age_cat= ifelse(age_offense %in% 0:24, "Less than 25",
+                                                 ifelse(age_offense %in% 25:45, "25 - 45",
+                                                        "Greater than 45")))
+
+#change certain columns into factor  
+subset.score.df$c_charge_degree <- factor(subset.score.df$c_charge_degree, levels = c("M", "F"))
+subset.score.df$age_cat <- factor(subset.score.df$age_cat, 
+                                  levels = c("Less than 25" , "25 - 45" , "Greater than 45"))
+subset.score.df$race <- factor(subset.score.df$race)
+subset.score.df$sex <- factor(subset.score.df$sex, levels = c("Male", "Female"))
+subset.score.df$is_recid <- factor(subset.score.df$is_recid, levels = c("0", "1"))
+
+#raw.score.df selects predictors that would be considered
+
+raw.score.df <- subset.score.df[,-c(2,3,6,7,9,10,14,15,18,20)]
+
+```
+
+
+### DATA CLEANING FOR VIOLENT DATASET
+```{r}
+#df cleaning for all criminals
+violent.subset.score.df <- dplyr::select(compas.score.violent, sex, dob, age, age_cat, race, c_offense_date, c_arrest_date, juv_fel_count, days_b_screening_arrest, decile_score, juv_misd_count, juv_other_count, priors_count, c_jail_in, c_jail_out,c_charge_degree, is_recid, is_violent_recid, score_text)
+
+violent.subset.score.df %>%
+  filter(days_b_screening_arrest <= 30) %>%
+  filter(days_b_screening_arrest >= -30) %>% 
+  filter(c_charge_degree != "O") %>%
+  filter(score_text != 'N/A')
+
+#add new column to indicate length of stay in jail
+violent.subset.score.df$stay <- as.numeric(as.Date(violent.subset.score.df$c_jail_out) 
+                                - as.Date(violent.subset.score.df$c_jail_in))
+violent.subset.score.df$stay[is.na(violent.subset.score.df$stay)] = 0
+
+#create age of arrest column 
+violent.subset.score.df$age_offense <- as.numeric(as.Date(violent.subset.score.df$c_offense_date) - as.Date(violent.subset.score.df$dob))
+violent.subset.score.df$age_offense <- round(violent.subset.score.df$age_offense/365)
+
+#change categorphy demographics if needed
+violent.subset.score.df <- mutate(violent.subset.score.df, age_cat= ifelse(age_offense %in% 0:24, "Less than 25",
+                                                 ifelse(age_offense %in% 25:45, "25 - 45",
+                                                        "Greater than 45")))
+
+#change certain columns into factor  
+violent.subset.score.df$c_charge_degree <- factor(violent.subset.score.df$c_charge_degree, levels = c("M", "F"))
+violent.subset.score.df$age_cat <- factor(violent.subset.score.df$age_cat, 
+                                  levels = c("Less than 25" , "25 - 45" , "Greater than 45"))
+violent.subset.score.df$race <- factor(violent.subset.score.df$race)
+violent.subset.score.df$sex <- factor(violent.subset.score.df$sex, levels = c("Female", "Male"))
+violent.subset.score.df$is_violent_recid <- factor(violent.subset.score.df$is_violent_recid, levels = c("0", "1"))
+
+#raw.score.violent.df selects predictors that would be considered
+raw.score.violent.df <- violent.subset.score.df[,-c(2,3,6,7,9,10,14,15,17,19,21)]
+
+```
+
+
+**1.2 Training & Test Splits**
+
+Imbalance was a major issue seen in the recidivism dataset. We addressed this problem by upsampling the data for both the recidivism and violent recidivism training set using upsampling function in Caret's package. 
+
+**Part 1: General Recidivism **
+
+```{r}
+set.seed(981)
+
+# Upsample the data to artifically overcome sample imbalance
+raw.score.df.more.idx <- sample(which(raw.score.df$is_recid == 1), 15000, replace = TRUE)
+raw.score.df.upsample <- rbind(raw.score.df,
+                            raw.score.df[raw.score.df.more.idx, ])
+
+# Randomly select 20% of the data to be held out for model validation
+test.indexes <- sample(1:nrow(raw.score.df.upsample), 
+                       round(0.2 * nrow(raw.score.df.upsample)))
+train.indexes <- setdiff(1:nrow(raw.score.df.upsample), test.indexes)
+
+# Just pull the covariates available to marketers 
+raw.score.df.train <- raw.score.df.upsample[train.indexes, ]
+raw.score.df.test <- raw.score.df.upsample[test.indexes, ]
+```
+
+
+**Part 2: Violent Recidivism **
+
+```{r}
+set.seed(981)
+
+# Upsample the data to artifically overcome sample imbalance
+raw.score.violent.df.more.idx <- sample(which(raw.score.violent.df$is_violent_recid == 1), 15000, replace = TRUE)
+raw.score.violent.df.upsample <- rbind(raw.score.violent.df,
+                            raw.score.violent.df[raw.score.violent.df.more.idx, ])
+
+# Randomly select 20% of the data to be held out for model validation
+test.indexes <- sample(1:nrow(raw.score.violent.df.upsample), 
+                       round(0.2 * nrow(raw.score.violent.df.upsample)))
+train.indexes <- setdiff(1:nrow(raw.score.violent.df.upsample), test.indexes)
+
+# Just pull the covariates available to marketers 
+raw.score.violent.df.train <- raw.score.violent.df.upsample[train.indexes, ]
+raw.score.violent.df.test <- raw.score.violent.df.upsample[test.indexes, ]
+```
+
+
+**2 Exploratory Data Analysis**
+
+In this section, we investgiated our cleaned data to see how recidivism is correlated with different independent variables. This is  investigated for both recidivism and violent recidivism. These plots give a brief overview of the demographics of the non-violent cases. As these plots show, the most common groups are Male, African-American, and between 25-45 years old.
+
+
+**2.1 General Recidivism Independent Analysis**
+.
+**2.11 Independent Analysis**
+
+###### Sex
+```{r}
+sex_sum <- raw.score.df %>%
+  group_by(sex) %>%
+  summarize(Count = n())
+```
+
+```{r}
+sex_plot = ggplot(data = sex_sum, aes(x = sex, y = Count, fill = sex)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Sex Distribution", x = "Sex", y = "Count")
+
+sex_plot
+```
+
+###### Race
+```{r}
+race_sum <- raw.score.df %>%
+  group_by(race) %>%
+  summarize(Count = n())
+```
+
+```{r}
+race_plot = ggplot(data = race_sum, aes(x = race, y = Count, fill = race)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Race Distribution", x = "Race", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+race_plot
+```
+
+###### Age
+```{r}
+age_sum <- raw.score.df %>%
+  group_by(age_cat) %>%
+  summarize(Count = n())
+```
+
+```{r}
+age_plot = ggplot(data = age_sum, aes(x = age_cat, y = Count, fill = age_cat)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Age Distribution", x = "Age", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+age_plot
+```
+
+**2.12 Bivariate Analysis**
+
+These plots show the relationship between the recidivism rates and the other variables. 
+
+###### Sex vs. Recidivism
+```{r}
+sex_recid_sum <- raw.score.df %>%
+  group_by(is_recid, sex) %>%
+  summarize(Count = n())
+```
+
+```{r}
+sex_recid_plot = ggplot(data = sex_recid_sum, aes(x = is_recid, y = Count, fill = sex)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Sex vs. Recidivism", x = "is_recid", y = "Count")
+
+sex_recid_plot
+```
+Females had a lower percentage of reconviction than males.
+
+###### Age vs. Recidivism
+```{r}
+age_recid_sum <- raw.score.df %>%
+  group_by(is_recid, age_cat) %>%
+  summarize(Count = n())
+```
+
+```{r}
+age_recid_plot = ggplot(data = age_recid_sum, aes(x = is_recid, y = Count, fill = age_cat)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Age vs. Recidivism", x = "is_recid", y = "Count")
+
+age_recid_plot
+```
+While a higher percentage of the less than 25 year old age group were reconvicted, the other two categories saw lower percentages of reconviction than that group.
+
+###### Juv_Fel_Count vs. Recidivism
+```{r}
+juvf_recid_sum <- raw.score.df %>%
+  group_by(Recidivism = as.factor(is_recid)) %>%
+  summarize(Juv_Fel = round(mean(juv_fel_count), 2))
+```
+
+```{r}
+juvf_recid_plot = ggplot(data = juvf_recid_sum, aes(x = Recidivism, y = Juv_Fel, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Juv_Fel_Count vs. Recidivism", x = "is_recid", y = "Juv_Fel")
+
+juvf_recid_plot
+```
+Those in the reconvicted group had a higher juvenile felony count on average.
+
+###### Juv_Misd_Count vs. Recidivism
+```{r}
+juvm_recid_sum <- raw.score.df %>%
+  group_by(Recidivism = as.factor(is_recid)) %>%
+  summarize(Juv_Misd = round(mean(juv_misd_count), 2))
+```
+
+```{r}
+juvm_recid_plot = ggplot(data = juvm_recid_sum, aes(x = Recidivism, y = Juv_Misd, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Juv_Misd_Count vs. Recidivism", x = "is_recid", y = "Juv_Misd")
+
+juvm_recid_plot
+```
+Those in the reconvicted group had a higher juvenile misdemeanor count on average.
+
+###### Juv_Other_Count vs. Recidivism
+```{r}
+juvo_recid_sum <- raw.score.df %>%
+  group_by(Recidivism = as.factor(is_recid)) %>%
+  summarize(Juv_Other = round(mean(juv_other_count), 2))
+```
+
+```{r}
+juvo_recid_plot = ggplot(data = juvo_recid_sum, aes(x = Recidivism, y = Juv_Other, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Juv_Other_Count vs. Recidivism", x = "is_recid", y = "Juv_Other")
+
+juvo_recid_plot
+```
+
+###### Priors_Count vs. Recidivism
+```{r}
+priors_recid_sum <- raw.score.df %>%
+  group_by(Recidivism = as.factor(is_recid)) %>%
+  summarize(Priors = round(mean(priors_count), 2))
+```
+
+```{r}
+priors_recid_plot = ggplot(data = priors_recid_sum, aes(x = Recidivism, y = Priors, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Priors_Count vs. Recidivism", x = "is_recid", y = "Priors")
+
+priors_recid_plot
+```
+Those in the reconvicted group had a higher priors count on average.
+
+
+###### c_charge_degree vs. Recidivism
+```{r}
+c_recid_sum <- raw.score.df %>%
+  group_by(is_recid, c_charge_degree) %>%
+  summarize(Count = n())
+```
+
+```{r}
+c_recid_plot = ggplot(data = c_recid_sum, aes(x = is_recid, y = Count, fill = c_charge_degree)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "c_charge_degree vs. Recidivisim", x = "is_recid", y = "c_charge_degree")
+
+c_recid_plot
+```
+While those who were charged with a misdemeanor had a lower percentage of being reconvicted, those charged with a felony had a higher percentage of being reconvicted.
+
+
+###### Stay vs. Recidivism
+```{r}
+stay_recid_sum <- raw.score.df %>%
+  filter(!is.na(stay)) %>%
+  group_by(Recidivism = as.factor(is_recid)) %>%
+  summarize(Stay = round(mean(stay), 2))
+```
+
+```{r}
+stay_recid_plot = ggplot(data = stay_recid_sum, aes(x = Recidivism, y = Stay, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Stay vs. Recidivism", x = "is_recid", y = "Stay")
+
+stay_recid_plot
+```
+Those in the reconvicted group had a higher length of stay on average.
+
+
+The next couple of plots show the relationship between demographic information and charge degree.
+
+###### Race vs. c_charge_degree 
+```{r}
+race_c_sum <- raw.score.df %>%
+  group_by(race, c_charge_degree) %>%
+  summarize(Count = n())
+```
+
+```{r}
+race_c_plot = ggplot(data = race_c_sum, aes(x = race, y = Count, fill = c_charge_degree)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Race vs. c_charge_degree", x = "race", y = "c_charge_degree") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+race_c_plot
+```
+African-Americans had a higher percentage of felonies than the other racial groups.
+
+###### Sex vs. c_charge_degree 
+```{r}
+sex_c_sum <- raw.score.df %>%
+  group_by(sex, c_charge_degree) %>%
+  summarize(Count = n())
+```
+
+```{r}
+sex_c_plot = ggplot(data = sex_c_sum, aes(x = sex, y = Count, fill = c_charge_degree)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Sex vs. c_charge_degree", x = "sex", y = "c_charge_degree")
+
+sex_c_plot
+```
+Males had a higher percentage of felonies than Females.
+
+
+
+**2.2 2-year Violent Recidivism**
+
+**2.21 Indepdent Analysis**
+
+##### Demographics
+These plots give a brief overview of the demographics of the violent cases. As these plots show, the most common groups are Male, African-American, and between 25-45 years old, just as in the non-violent case group. 
+
+###### Sex
+```{r}
+vsex_sum <- raw.score.violent.df %>%
+  group_by(sex) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vsex_plot = ggplot(data = vsex_sum, aes(x = sex, y = Count, fill = sex)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Sex Distribution (Violent)", x = "Sex", y = "Count")
+
+vsex_plot
+```
+
+###### Race
+```{r}
+vrace_sum <- raw.score.violent.df %>%
+  group_by(race) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vrace_plot = ggplot(data = vrace_sum, aes(x = race, y = Count, fill = race)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Race Distribution (Violent)", x = "Race", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+vrace_plot
+```
+
+###### Age
+```{r}
+vage_sum <- raw.score.violent.df %>%
+  group_by(age_cat) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vage_plot = ggplot(data = vage_sum, aes(x = age_cat, y = Count, fill = age_cat)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Age Distribution (Violent)", x = "Age", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+vage_plot
+```
+
+**2.22 Bivariate Analysis**
+
+These plots show the relationship between the recidivism rates and the other variables.
+
+###### Sex vs. Recidivism
+```{r}
+vsex_recid_sum <- raw.score.violent.df %>%
+  group_by(is_violent_recid, sex) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vsex_recid_plot = ggplot(data = vsex_recid_sum, aes(x = is_violent_recid, y = Count, fill = sex)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Sex vs. Recidivism (Violent)", x = "is_violent_recid", y = "Count")
+
+vsex_recid_plot
+```
+Females and males both had a lower percentage of reconviction than no reconviction, unlike in the non-violent cases.
+
+
+###### Age vs. Recidivism
+```{r}
+vage_recid_sum <- raw.score.violent.df %>%
+  group_by(is_violent_recid, age_cat) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vage_recid_plot = ggplot(data = vage_recid_sum, aes(x = is_violent_recid, y = Count, fill = age_cat)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Age vs. Recidivism (Violent)", x = "is_violent_recid", y = "Count")
+
+vage_recid_plot
+```
+All age categories saw a lower percentage of reconviction than no reconviction, unlike in the non-violent cases.
+
+###### Juv_Fel_Count vs. Recidivism
+```{r}
+vjuvf_recid_sum <- raw.score.violent.df %>%
+  group_by(Recidivism = as.factor(is_violent_recid)) %>%
+  summarize(Juv_Fel = round(mean(juv_fel_count), 2))
+```
+
+```{r}
+vjuvf_recid_plot = ggplot(data = vjuvf_recid_sum, aes(x = Recidivism, y = Juv_Fel, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Juv_Fel_Count vs. Recidivism (Violent)", x = "is_violent_recid", y = "Juv_Fel")
+
+vjuvf_recid_plot
+```
+Those in the reconvicted group had a higher juvenile felony count on average, just like in the non-violent cases.
+
+###### Juv_Misd_Count vs. Recidivism
+```{r}
+vjuvm_recid_sum <- raw.score.violent.df %>%
+  group_by(Recidivism = as.factor(is_violent_recid)) %>%
+  summarize(Juv_Misd = round(mean(juv_misd_count), 2))
+```
+
+```{r}
+vjuvm_recid_plot = ggplot(data = vjuvm_recid_sum, aes(x = Recidivism, y = Juv_Misd, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Juv_Misd_Count vs. Recidivism (Violent)", x = "is_violent_recid", y = "Juv_Misd")
+
+vjuvm_recid_plot
+```
+Those in the reconvicted group had a higher juvenile misdemeanor count on average, just like in the non-violent cases.
+
+
+###### Juv_Other_Count vs. Recidivism
+```{r}
+vjuvo_recid_sum <- raw.score.violent.df %>%
+  group_by(Recidivism = as.factor(is_violent_recid)) %>%
+  summarize(Juv_Other = round(mean(juv_other_count), 2))
+```
+
+```{r}
+vjuvo_recid_plot = ggplot(data = vjuvo_recid_sum, aes(x = Recidivism, y = Juv_Other, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Juv_Other_Count vs. Recidivism (Violent)", x = "is_violent_recid", y = "Juv_Other")
+
+vjuvo_recid_plot
+```
+
+###### Priors_Count vs. Recidivism
+```{r}
+vpriors_recid_sum <- raw.score.violent.df %>%
+  group_by(Recidivism = as.factor(is_violent_recid)) %>%
+  summarize(Priors = round(mean(priors_count), 2))
+```
+
+```{r}
+vpriors_recid_plot = ggplot(data = vpriors_recid_sum, aes(x = Recidivism, y = Priors, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Priors_Count vs. Recidivism (Violent)", x = "is_violent_recid", y = "Priors")
+
+vpriors_recid_plot
+```
+Those in the reconvicted group had a higher priors count on average, just like in the non-violent cases.
+
+
+###### c_charge_degree vs. Recidivism
+```{r}
+vc_recid_sum <- raw.score.violent.df %>%
+  group_by(is_violent_recid, c_charge_degree) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vc_recid_plot = ggplot(data = vc_recid_sum, aes(x = is_violent_recid, y = Count, fill = c_charge_degree)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "c_charge_degree vs. Recidivisim (Violent)", x = "is_violent_recid", y = "c_charge_degree")
+
+vc_recid_plot
+```
+Both charge groups had a lower percentage of being reconvicted than not reconvicted, unlike in the non-violent cases.
+
+
+###### Stay vs. Recidivism
+```{r}
+vstay_recid_sum <- raw.score.violent.df %>%
+  filter(!is.na(stay)) %>%
+  group_by(Recidivism = as.factor(is_violent_recid)) %>%
+  summarize(Stay = round(mean(stay), 2))
+```
+
+```{r}
+vstay_recid_plot = ggplot(data = vstay_recid_sum, aes(x = Recidivism, y = Stay, fill = Recidivism)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Stay vs. Recidivism (Violent)", x = "is_recid", y = "Stay")
+
+vstay_recid_plot
+```
+Those in the reconvicted group had a higher length of stay on average, just like in the non-violent cases.
+
+
+The next couple of plots show the relationship between demographic information and charge degree.
+
+###### Race vs. c_charge_degree 
+```{r}
+vrace_c_sum <- raw.score.violent.df %>%
+  group_by(race, c_charge_degree) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vrace_c_plot = ggplot(data = vrace_c_sum, aes(x = race, y = Count, fill = c_charge_degree)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Race vs. c_charge_degree (Violent)", x = "race", y = "c_charge_degree") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+vrace_c_plot
+```
+African-Americans had a higher percentage of felonies than the other racial groups.
+
+###### Sex vs. c_charge_degree 
+```{r}
+vsex_c_sum <- raw.score.violent.df %>%
+  group_by(sex, c_charge_degree) %>%
+  summarize(Count = n())
+```
+
+```{r}
+vsex_c_plot = ggplot(data = vsex_c_sum, aes(x = sex, y = Count, fill = c_charge_degree)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  labs(title = "Sex vs. c_charge_degree (Violent)", x = "sex", y = "c_charge_degree")
+
+vsex_c_plot
+```
+Males had a higher percentage of felonies than females.
+
+On the whole, most of the violent cases have a similar spread to the non-violent cases, barring the relationship between some demographic information and recidivism and the relationship between charge degree and recidivism.
+
+Now we'll turn to modeling recidivism. 
+
+**3. Modelling**
+
+**3.1 General Recidivism**
+
+**3.11 Logistic Regression**
+
+## Model Formation ##
+```{r}
+general.fit <- glm(is_recid ~ ., family = "binomial", data = raw.score.df)
+
+# summary(general.fit)
+##which factors show statistical significance 
+
+general.summary <- coef(summary(general.fit))[,'Pr(>|z|)']
+names(general.summary[general.summary<= .05])
+
+```
+According to the logistic regression, it appears that gender, age category, race, charge, and prior history (juv count, priors count, length of time in jail, and charge degree) are statistically related to whether someone is recidivated. 
+
+## Evaluate most important variables ##
+```{r}
+#find best subset
+set.seed(150)
+subset.data <- raw.score.df[sample(nrow(raw.score.df), 3607), ]
+raw.data.subset <- regsubsets(is_recid ~ .,
+                              data = subset.data,
+                              nbest = 1,
+                              nvmax = NULL,
+                              method = "forward", really.big = TRUE)
+```
+
+BIC test was chosen since we have only very few predictors
+```{r}
+# Run BIC test 
+BIC.summary <- summary(raw.data.subset)
+plot(BIC.summary$bic, xlab  = "Number of Variables", ylab = "BIC", type = "l")
+print(names(coef(raw.data.subset, id = which.min(BIC.summary$bic))))
+
+
+# sex, age_cat, juv_other_count, priors_count, c_charge_degree, stay
+```
+
+Variables related to gender, age, juvenile history, prior count, and charge degree seem to explain most of the outcome with the least amount of error 
+
+## Prediction with Logistic Regression ##
+
+```{r}
+log.fit <- glm(is_recid ~ ., family = "binomial", data = raw.score.df.train)
+glm.predict <- predict(log.fit, newdata = raw.score.df.test, type = "response") 
+
+glm.conf.nv <- confusionMatrix(data = as.factor(ifelse(glm.predict > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.test$is_recid), 
+                dnn = c("Prediction", "Reference")) 
+glm.conf.nv
+```
+
+Our logistic regression shows a high classification rate of `r round(glm.conf.nv$overall["Accuracy"]*100, 2)`%. However, it has predicted relately accurately those who those are likely to be recidivated, but also has a high specificity. This means that it is grouping those who are likely to be recidivated though that might not be true. 
+
+
+## ROC Curve ##
+
+```{r}
+predicts <- predict(log.fit, type = 'response')
+ROCRpred <- prediction(predicts, raw.score.df.train$is_recid)
+ROCRperf <- performance(ROCRpred, 'tpr', 'fpr')
+plot(ROCRperf)
+```
+
+The ROC curve shows that achieving a very high true positive rate a very low false positive rate is very unlikely. 
+
+
+**3.12 LDA **
+
+
+```{r}
+lda.fit <- lda(is_recid ~ ., data = raw.score.df.train)
+
+plot(lda.fit, col = as.numeric(raw.score.df.train$is_recid))
+
+lda.predict <- predict(lda.fit, newdata = raw.score.df.test) 
+lda.conf <- confusionMatrix(data = as.factor(lda.predict$class), 
+                reference = as.factor(raw.score.df.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+lda.conf
+```
+
+LDA has classification rate of `r round(lda.conf$overall["Accuracy"]*100, 2)`%. While this is able to have a high sensitivity, it also has a high specficity, meaning that it is also growing those who did not commit recidivism are being classified as them likely to. 
+
+
+**3.13 QDA **
+
+```{r}
+qda.fit <- qda(is_recid ~ ., data = raw.score.df.train)
+
+qda.predict <- predict(qda.fit, newdata = raw.score.df.test) 
+qda.conf <- confusionMatrix(data = as.factor(qda.predict$class), 
+                reference = as.factor(raw.score.df.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+qda.conf
+```
+Classification rate achieved for this is `r round(qda.conf$overall["Accuracy"]*100, 2)`%, which is very low compared to the classification rate achieved to LDA and Logistic Regression. This model seems to have a tendency to classify more people as not likely to commit recidivism, which is the opposite of what we have observed so far. 
+
+
+
+**3.14 Naive Bayes **
+
+```{r warning = FALSE}
+nb.fit <- NaiveBayes(is_recid ~ ., data = raw.score.df.train)
+
+nb.predict <- predict(nb.fit, newdata = raw.score.df.test) 
+nb.conf <- confusionMatrix(data = as.factor(nb.predict$class), 
+                reference = as.factor(raw.score.df.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+nb.conf
+```
+Naive Bayes has a classification rate of `r round(nb.conf$overall["Accuracy"]*100, 2)`%, which is low compared to the other models before. This definitely makes sense since Naive Bayes assumes independence and this dataset has a lot of factors that are very likely to be related to one another. 
+
+
+**3.15 Tree **
+
+Next, we turn to classification trees to model our data. 
+
+We create a full tree with the rpart function, and then prune it back using the CP for which the relative error is lowest. 
+
+```{r}
+#making a full tree
+tree.full <- rpart(is_recid ~ ., data = raw.score.df.train, 
+                       control = rpart.control(minsplit=50, cp=0.0005))
+plotcp(tree.full)
+tree.full$cptable
+
+tree.full.party <- as.party(tree.full)
+plot(tree.full.party)
+print(tree.full.party)
+```
+
+```{r}
+#pruning tree based on min cp
+cp.index <- which.min(tree.full$cptable[, "xerror"])
+cp.use <- tree.full$cptable[, "CP"][cp.index]
+
+tree.pruned <- prune(tree.full, cp = cp.use)
+plot(tree.pruned)
+text(tree.pruned, pretty=0)
+
+tree.pruned.party <- as.party(tree.pruned)
+plot(tree.pruned.party)
+```
+
+```{r}
+#fitting and predicting on pruned tree
+tree.pruned.predict <- predict(tree.pruned, newdata = raw.score.df.test, type = "prob")
+
+t.conf <- confusionMatrix(data = as.factor(ifelse(tree.pruned.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+t.conf
+```
+
+This classifier performs pretty well, at `r round(t.conf$overall["Accuracy"]*100, 2)`%, but we had to make the CP very low to get it to work, and large trees such as this one are very high variance trees, so it may not be the best model for this data. 
+
+**3.16 Random Forest ** 
+
+Because one tree by itself has low bias but high variance, we turn to a random forest classifier to see if it would predict a little bit better. 
+
+```{r}
+#random forest
+rf.fit <- randomForest(is_recid ~ ., data = raw.score.df.train)
+print(rf.fit)
+
+varImpPlot(rf.fit)
+
+rf.predict <- predict(rf.fit, newdata = raw.score.df.test, type = "prob") 
+rf.conf <- confusionMatrix(data = as.factor(ifelse(rf.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+rf.conf
+```
+
+We see that with this one, the most important variables seem to be `stay`, and `priors_count`, with `race` and `age_cat` as our seecond tier important variables. 
+
+The random forest performs with a classification rate of about `r round(rf.conf$overall["Accuracy"]*100, 2)`%, which is also pretty high.
+
+**Conclusion** : Random forest has the highest classification rate here (just a little bit more than the logistic regression), so we picked that as our winning model. Interpretibility issues aresomething to be taken into account here, so logistic regression is an alternative option that has about the same classification score and a higher level of interpretibility. 
+
+
+**3.2 Violent Recidivism**
+
+**3.21 Logistic Regression **
+
+
+## Model Formation ##
+```{r}
+general.violent.fit <- glm(is_violent_recid ~ ., family = "binomial", data = raw.score.violent.df)
+# summary(general.violent.fit)
+##which factors show statistical significance 
+general.violent.summary <- coef(summary(general.violent.fit))[,'Pr(>|z|)']
+names(general.violent.summary[general.violent.summary<= .05])
+
+```
+Gender, Age Category, Race, juv felony count, juv misdemeanor count, juv other count, priors count, and stay are all statstically significant 
+
+
+## Evaulate most important variables ##
+```{r}
+set.seed(150)
+subset.violent.data <- raw.score.violent.df[sample(nrow(raw.score.violent.df), 3607), ]
+raw.data.violent.subset <- regsubsets(is_violent_recid ~ .,
+                              data = subset.violent.data,
+                              nbest = 1,
+                              nvmax = NULL,
+                              method = "forward", really.big = TRUE)
+```
+
+BIC test was chosen since we have only very few predictors
+
+```{r}
+# Running BIC test 
+BIC.violent.summary <- summary(raw.data.violent.subset)
+plot(BIC.violent.summary$bic, xlab  = "Number of Variables", ylab = "BIC", type = "l")
+print(names(coef(raw.data.violent.subset, id = which.min(BIC.violent.summary$bic))))
+```
+Variables that seem to matter the most towards likelihood of ricidivism are sex, age category, juv felony count, juv misdemeanor count, juv other count, priors count, and length of stay. 
+
+
+## Prediction with Logistic Regression ##
+```{r}
+
+#logistic regression
+log.violent.fit <- glm(is_violent_recid ~ ., family = "binomial", data = raw.score.violent.df.train)
+glm.violent.predict <- predict(log.violent.fit, newdata = raw.score.violent.df.test, type = "response") 
+
+glm.conf.v <- confusionMatrix(data = as.factor(ifelse(glm.violent.predict > 0.6, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference")) 
+
+glm.conf.v
+```
+
+This model has a classification rate of `r round(glm.conf.v$overall["Accuracy"]*100, 2)`%, which is slightly lower than the generalized recidivism model. it is worth noting that more cases are being categorized as 1 (meaning the person is likely going to commit a crime again) regardless of whether they have done so. 
+
+
+### ROC CURVE FOR LOGISTIC REGRESSION 
+```{r}
+
+violent.predicts <- predict(log.violent.fit, type = 'response')
+ROCRpred.violent <- prediction(violent.predicts, raw.score.violent.df.train$is_violent_recid)
+ROCRperf.violent <- performance(ROCRpred.violent, 'tpr', 'fpr')
+plot(ROCRperf.violent)
+
+
+```
+The ROC curve (like before) shows that this current model also cannot achieve very high true positive rate and a low false positive rate. However, compared to the general ROC curve found earlier, this curve is shifted more to the upright in comparison to the previous one. This means that our classification is doing some level of good compared to just randomly choosing the classifications. 
+
+**3.22 LDA **
+
+```{r}
+lda.violent.fit <- lda(is_violent_recid ~ ., data = raw.score.violent.df.train)
+
+plot(lda.violent.fit, col = as.numeric(raw.score.violent.df.train$is_violent_recid))
+
+lda.violent.predict <- predict(lda.violent.fit, newdata = raw.score.violent.df.test) 
+lda.conf.v <- confusionMatrix(data = as.factor(lda.violent.predict$class), 
+                reference = as.factor(raw.score.violent.df.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+lda.conf.v
+```
+The classification rate is `r round(lda.conf.v$overall["Accuracy"]*100, 2)`%. This achieves a similar classification rate to the logisitic regression.
+
+**3.23  QDA **
+
+```{r}
+qda.violent.fit <- qda(is_violent_recid ~ ., data = raw.score.violent.df.train)
+
+qda.violent.predict <- predict(qda.violent.fit, newdata = raw.score.violent.df.test) 
+qda.conf.v <- confusionMatrix(data = as.factor(qda.violent.predict$class), 
+                reference = as.factor(raw.score.violent.df.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+qda.conf.v
+```
+This achieved a low classification rate of `r round(qda.conf.v$overall["Accuracy"]*100, 2)`%.
+
+
+
+**3.33  Naive Bayes**
+
+
+```{r warning = FALSE}
+nb.violent.fit <- NaiveBayes(is_violent_recid ~ ., data = raw.score.violent.df.train)
+
+nb.violent.predict <- predict(nb.violent.fit, newdata = raw.score.violent.df.test) 
+nb.conf.v <- confusionMatrix(data = as.factor(nb.violent.predict$class), 
+                reference = as.factor(raw.score.violent.df.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+nb.conf.v
+```
+The classification rate is `r round(nb.conf.v$overall["Accuracy"]*100, 2)`%, which is much lower compared to the other models, which again makes sense since most of our variables are likely correlated. 
+
+
+**3.34  Tree** 
+
+We then turn again to trees, building a very large one and then pruning it back based on CP. 
+
+```{r}
+#making a full tree, violent
+tree.violent.full <- rpart(is_violent_recid ~ ., data = raw.score.violent.df.train, 
+                       control = rpart.control(minsplit=50, cp=0.001))
+plotcp(tree.violent.full)
+tree.violent.full$cptable
+
+tree.violent.full.party <- as.party(tree.violent.full)
+plot(tree.violent.full.party)
+print(tree.violent.full.party)
+```
+
+```{r}
+#pruning tree based on min cp
+cp.index <- which.min(tree.violent.full$cptable[, "xerror"])
+cp.use <- tree.violent.full$cptable[, "CP"][cp.index]
+cp.use
+
+tree.violent.pruned <- prune(tree.violent.full, cp = cp.use)
+plot(tree.violent.pruned)
+text(tree.violent.pruned, pretty=0)
+
+tree.violent.pruned.party <- as.party(tree.violent.pruned)
+plot(tree.violent.pruned.party)
+print(tree.violent.pruned.party)
+```
+
+```{r}
+#fitting and predicting on pruned tree
+tree.violent.pruned.predict <- predict(tree.violent.pruned, newdata = raw.score.violent.df.test, type = "prob")
+
+t.conf.v <- confusionMatrix(data = as.factor(ifelse(tree.violent.pruned.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+t.conf.v
+```
+
+The tree performs with a rate of `r round(t.conf.v$overall["Accuracy"]*100, 2)`%, and again we look at random forests as well. 
+
+
+## RANDOM FOREST
+
+Again, because we want to account for the high variance on our single tree, we also fit our data to a random forest model. 
+
+```{r}
+#violent
+rf.violent.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.train)
+print(rf.violent.fit)
+
+varImpPlot(rf.violent.fit)
+
+rf.violent.predict <- predict(rf.violent.fit, newdata = raw.score.violent.df.test, type = "prob") 
+rf.conf.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+rf.conf.v
+
+```
+
+Here, we see that `stay` and `priors_count` are the two most important variables, with `race` and `age_cat` again being the second tier most important. This achieves a classification rate of `r round(rf.conf.v$overall["Accuracy"]*100, 2)`%.
+
+**Conclusion** : Here, random forest largely outperforms all of the other models, so even with interpretbility concerns it seems to be the best model for predicting violent recidivism.
+
+
+**4. Comparing our two RAIs to each other**
+
+Our next step is to see if the two RAI's that are constructured are equally predictive across race/ethnicity, age, and gender. 
+
+
+**4.1 Race**
+
+### Data cleaning
+
+First we filter out our datasets to each level of the `race` variable so we can check for systemic differences between them. Through our EDA, we know that African-American and Caucasian are the two largest races we have in this data, so we focus on them for this analysis. 
+
+```{r}
+#nonviolent
+
+raw.score.df.black.train <- filter(raw.score.df.train, race == "African-American")
+raw.score.df.white.train <- filter(raw.score.df.train, race == "Caucasian")
+
+raw.score.df.black.test <- filter(raw.score.df.test, race == "African-American")
+raw.score.df.white.test <- filter(raw.score.df.test, race == "Caucasian")
+
+#violent
+
+raw.score.violent.df.black.train <- filter(raw.score.violent.df.train, race == "African-American")
+raw.score.violent.df.white.train <- filter(raw.score.violent.df.train, race == "Caucasian")
+
+raw.score.violent.df.black.test <- filter(raw.score.violent.df.test, race == "African-American")
+raw.score.violent.df.white.test <- filter(raw.score.violent.df.test, race == "Caucasian")
+```
+
+
+Next, we'll test our winning models on these categories. 
+
+### Random Forest for Nonviolent
+
+```{r}
+#random forest
+rf.black.fit <- randomForest(is_recid ~ ., data = raw.score.df.black.train)
+print(rf.black.fit)
+
+varImpPlot(rf.black.fit)
+
+rf.black.predict <- predict(rf.black.fit, newdata = raw.score.df.black.test, type = "prob") 
+conf.black <- confusionMatrix(data = as.factor(ifelse(rf.black.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.black.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.black
+```
+
+For African Americans, the classification rate is about `r round(conf.black$overall["Accuracy"]*100, 2)`%, with largely the same variables being important (with race falling to the bottom for obvious reasons).
+
+```{r}
+#random forest
+rf.white.fit <- randomForest(is_recid ~ ., data = raw.score.df.white.train)
+print(rf.white.fit)
+
+varImpPlot(rf.white.fit)
+
+rf.white.predict <- predict(rf.white.fit, newdata = raw.score.df.white.test, type = "prob") 
+conf.white <- confusionMatrix(data = as.factor(ifelse(rf.white.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.white.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.white
+```
+
+Our classification rate for white folks is about `r round(conf.white$overall["Accuracy"]*100, 2)`%, which compared to the accuracy of African Americans, implies some sort of racial bias within either the system or our model. 
+
+### Random Forest for Violent
+
+```{r}
+#violent
+rf.violent.black.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.black.train)
+print(rf.violent.black.fit)
+
+varImpPlot(rf.violent.black.fit)
+
+rf.violent.black.predict <- predict(rf.violent.black.fit, newdata = raw.score.violent.df.black.test, type = "prob") 
+conf.black.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.black.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.black.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.black.v
+
+```
+
+Our accuracy rate here is about `r round(conf.black.v$overall["Accuracy"]*100, 2)`% with again about the same important variables. 
+
+```{r}
+#violent
+rf.violent.white.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.white.train)
+print(rf.violent.white.fit)
+
+varImpPlot(rf.violent.white.fit)
+
+rf.violent.white.predict <- predict(rf.violent.white.fit, newdata = raw.score.violent.df.white.test, type = "prob") 
+conf.white.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.white.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.white.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.white.v
+
+```
+
+Our accuracy again falls to about `r round(conf.white.v$overall["Accuracy"]*100, 2)`%, which again implies some sort of racial bias in this problem. 
+
+**4.2 Gender**
+
+### Data Cleaning
+
+Again, first we filter out. 
+
+```{r}
+#nonviolent
+raw.score.df.fem.train <- filter(raw.score.df.train, sex == "Female")
+raw.score.df.male.train <- filter(raw.score.df.train, sex == "Male")
+
+raw.score.df.fem.test <- filter(raw.score.df.test, sex == "Female")
+raw.score.df.male.test <- filter(raw.score.df.test, sex == "Male")
+
+#violent
+raw.score.violent.df.fem.train <- filter(raw.score.violent.df.train, sex == "Female")
+raw.score.violent.df.male.train <- filter(raw.score.violent.df.train, sex == "Male")
+
+raw.score.violent.df.fem.test <- filter(raw.score.violent.df.test, sex == "Female")
+raw.score.violent.df.male.test <- filter(raw.score.violent.df.test, sex == "Male")
+```
+
+### Random Forest for Nonviolent
+
+```{r}
+#random forest
+rf.fem.fit <- randomForest(is_recid ~ ., data = raw.score.df.fem.train)
+print(rf.fem.fit)
+
+varImpPlot(rf.fem.fit)
+
+rf.fem.predict <- predict(rf.fem.fit, newdata = raw.score.df.fem.test, type = "prob") 
+conf.fem <- confusionMatrix(data = as.factor(ifelse(rf.fem.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.fem.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.fem
+```
+
+We achieve an `r round(conf.fem$overall["Accuracy"]*100, 2)`% classification rate for women in this dataset, with the important variables this time including `race` and `age_cat`. 
+
+```{r}
+#random forest
+rf.male.fit <- randomForest(is_recid ~ ., data = raw.score.df.male.train)
+print(rf.male.fit)
+
+varImpPlot(rf.male.fit)
+
+rf.male.predict <- predict(rf.male.fit, newdata = raw.score.df.male.test, type = "prob") 
+conf.male <- confusionMatrix(data = as.factor(ifelse(rf.male.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.male.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.male
+```
+
+Our classification rate here is `r round(conf.male$overall["Accuracy"]*100, 2)`%, which implies a gender bias in our model as well. 
+
+### Random Forest for Violent
+
+```{r}
+#violent
+rf.violent.fem.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.fem.train)
+print(rf.violent.fem.fit)
+
+varImpPlot(rf.violent.fem.fit)
+
+rf.violent.fem.predict <- predict(rf.violent.fem.fit, newdata = raw.score.violent.df.fem.test, type = "prob") 
+conf.fem.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.fem.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.fem.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.fem.v
+
+```
+
+Our accuracy rate here is about `r round(conf.fem.v$overall["Accuracy"]*100, 2)`% with again about the same important variables. 
+
+```{r}
+#violent
+rf.violent.male.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.male.train)
+print(rf.violent.male.fit)
+
+varImpPlot(rf.violent.male.fit)
+
+rf.violent.male.predict <- predict(rf.violent.male.fit, newdata = raw.score.violent.df.male.test, type = "prob") 
+conf.male.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.male.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.male.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.male.v
+
+```
+
+We have an accuracy rate of `r round(conf.male.v$overall["Accuracy"]*100, 2)`% here, which is closer to the female classification rate, but still higher than we'd like. There is probably a gender bias in our model somewhere. 
+
+**4.3 Age**
+
+### Data cleaning
+
+Filter out, by levels of `age_cat`.
+
+```{r}
+#nonviolent
+
+raw.score.df.under25.train <- filter(raw.score.df.train, age_cat == "Less than 25")
+raw.score.df.25to45.train <- filter(raw.score.df.train, age_cat == "25 - 45")
+raw.score.df.over45.train <- filter(raw.score.df.train, age_cat == "Greater than 45")
+
+raw.score.df.under25.test <- filter(raw.score.df.test, age_cat == "Less than 25")
+raw.score.df.25to45.test <- filter(raw.score.df.test, age_cat == "25 - 45")
+raw.score.df.over45.test <- filter(raw.score.df.test, age_cat == "Greater than 45")
+
+#violent
+
+raw.score.violent.df.under25.train <- filter(raw.score.violent.df.train, age_cat == "Less than 25")
+raw.score.violent.df.25to45.train <- filter(raw.score.violent.df.train, age_cat == "25 - 45")
+raw.score.violent.df.over45.train <- filter(raw.score.violent.df.train, age_cat == "Greater than 45")
+
+raw.score.violent.df.under25.test <- filter(raw.score.violent.df.test, age_cat == "Less than 25")
+raw.score.violent.df.25to45.test <- filter(raw.score.violent.df.test, age_cat == "25 - 45")
+raw.score.violent.df.over45.test <- filter(raw.score.violent.df.test, age_cat == "Greater than 45")
+```
+
+### Random Forest for Nonviolent
+
+```{r}
+#random forest
+rf.under25.fit <- randomForest(is_recid ~ ., data = raw.score.df.under25.train)
+print(rf.under25.fit)
+
+varImpPlot(rf.under25.fit)
+
+rf.under25.predict <- predict(rf.under25.fit, newdata = raw.score.df.under25.test, type = "prob") 
+conf.u25 <- confusionMatrix(data = as.factor(ifelse(rf.under25.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.under25.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.u25
+```
+
+Our model has a `r round(conf.u25$overall["Accuracy"]*100, 2)`% classification rate for people under 25.
+
+```{r}
+#random forest
+rf.25to45.fit <- randomForest(is_recid ~ ., data = raw.score.df.25to45.train)
+print(rf.25to45.fit)
+
+varImpPlot(rf.25to45.fit)
+
+rf.25to45.predict <- predict(rf.25to45.fit, newdata = raw.score.df.25to45.test, type = "prob") 
+conf.2545 <- confusionMatrix(data = as.factor(ifelse(rf.25to45.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.25to45.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.2545
+```
+
+Here we achieve a slightly less classification rate of about `r round(conf.2545$overall["Accuracy"]*100, 2)`% for individuals between 25 and 45. 
+
+```{r}
+#random forest
+rf.over45.fit <- randomForest(is_recid ~ ., data = raw.score.df.over45.train)
+print(rf.over45.fit)
+
+varImpPlot(rf.over45.fit)
+
+rf.over45.predict <- predict(rf.over45.fit, newdata = raw.score.df.over45.test, type = "prob") 
+conf.o45 <- confusionMatrix(data = as.factor(ifelse(rf.over45.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.df.over45.test$is_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.o45
+```
+
+We acheive a classification rate of about `r round(conf.o45$overall["Accuracy"]*100, 2)`%, which is a substantial drop from the `r round(conf.u25$overall["Accuracy"]*100, 2)`% we had with under 25 year olds. This again implies some sort of bias in our model. 
+
+### Random Forest for Violent
+
+```{r}
+#violent
+rf.violent.under25.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.under25.train)
+print(rf.violent.under25.fit)
+
+varImpPlot(rf.violent.under25.fit)
+
+rf.violent.under25.predict <- predict(rf.violent.under25.fit, newdata = raw.score.violent.df.under25.test, type = "prob") 
+conf.u25.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.under25.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.under25.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.u25.v
+
+```
+
+Here we have a classification rate of `r round(conf.u25.v$overall["Accuracy"]*100, 2)`%. 
+
+```{r}
+#violent
+rf.violent.male.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.male.train)
+print(rf.violent.male.fit)
+
+varImpPlot(rf.violent.male.fit)
+
+rf.violent.male.predict <- predict(rf.violent.male.fit, newdata = raw.score.violent.df.male.test, type = "prob") 
+conf.2545.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.male.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.male.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.2545.v
+
+```
+
+Here we are at a classification rate of `r round(conf.2545.v$overall["Accuracy"]*100, 2)`%. 
+
+```{r}
+#violent
+rf.violent.male.fit <- randomForest(is_violent_recid ~ ., data = raw.score.violent.df.male.train)
+print(rf.violent.male.fit)
+
+varImpPlot(rf.violent.male.fit)
+
+rf.violent.male.predict <- predict(rf.violent.male.fit, newdata = raw.score.violent.df.male.test, type = "prob") 
+conf.o45.v <- confusionMatrix(data = as.factor(ifelse(rf.violent.male.predict[, "1"] > 0.5, 1, 0)), 
+                reference = as.factor(raw.score.violent.df.male.test$is_violent_recid), 
+                dnn = c("Prediction", "Reference"))
+conf.o45.v
+
+```
+
+Here again we have a classification rate of `r round(conf.o45.v$overall["Accuracy"]*100, 2)`%. Here again as in gender, we see that the gap between classification rates isn't as high for violent crimes as it was for nonviolent, but there's still reason to be skeptical of our model due to bias here. 
+
+As we have seen from these analyses, our models from both parts (1) and (2) are unequally predictive across racial, sex, and age categories. This hinders our model's capability of classifiying new data due to this bias.
+
+**5. Comparing our RAIs to COMPAS **
+
+We then compared our RAIs we built againist COMPAS to see if the classification rate improved.  
+
+**COMPAS RAI**
+
+##### Non-violent COMPAS Recidivism Prediction
+```{r}
+performance <- compas.score.two.year %>%
+  filter(score_text != "Medium") 
+
+performance$score_text <- factor(performance$score_text, levels = c("Low", "High"))
+
+tab.comp = table(performance$score_text, performance$is_recid)
+tab.comp
+
+sum(diag(tab.comp))/sum(tab.comp)
+
+```
+
+The accuracy of COMPAS score for non-violent recidivism is about `r round((sum(diag(tab.comp))/sum(tab.comp))*100, 2)`%. This is lower than the accuracy of our model, which has an accuracy of about `r round(rf.conf$overall["Accuracy"]*100, 2)`%
+
+We removed medium from our analysis since medium is a vague term, and felt it would've been difficult to classify. We assumed that Low corresponds to 0 and High corresponds to 1. 
+
+##### Violent COMPAS Recidivism Prediction
+```{r}
+performance_violent <- compas.score.two.year %>%
+  filter(v_score_text != "Medium") 
+
+performance_violent$v_score_text <- factor(performance_violent$v_score_text, levels = c("Low", "High"))
+
+tab.comp.violent = table(performance_violent$v_score_text, performance_violent$is_violent_recid)
+tab.comp.violent
+
+sum(diag(tab.comp.violent))/sum(tab.comp.violent)
+
+```
+The accuracy of COMPAS score for violent recidivism is about `r round((sum(diag(tab.comp.violent))/sum(tab.comp.violent))*100, 2)`%. This is just a little lower than of our model, which has an accuracy of about `r round(as.numeric(rf.conf.v$overall[1]*100, 2))`%
+
+Overall, our model does a better job of prediciting non-violent recidivism than the COMPAS score and does about the same predicting violent recidivism.
+
+##### Bias in COMPAS
+
+```{r}
+performance <- subset.score.df[,-c(2,3,6,7,9,10,14,15,17,20)]
+performance$score_text <- factor(performance$score_text, levels = c("Low", "Medium", "High"))
+
+
+performance.logit <- glm(score_text ~ ., family = "binomial", data = performance)
+summary(performance.logit)
+```
+
+White defendants are 58.5% less likely to receive a higher score correcting for the seriousness of their crime, previous arrests, and future criminal behavior in comparisions to African Americans. 
+
+Female defendants are 23.56% more likely to receive a higher score in comparisions to their male counterparts, holding all other variables constant. Because this is not statistically significant, this indicates that there is little variability between the genders.
+
+Defendants who are under the age of 25 category are more likely to receive a higher score than the other two categories. Holding everything else constant, those who are age 25-45 are 122.8% less likely to receiving a higher score than those under 25 years old. Additionally, those older than 45 are 154.8% less likely to receiving a higher score. 
+
+```{r}
+high.risk <- subset(compas.score.two.year, subset = score_text == "High")
+low.risk <- subset(compas.score.two.year, subset = score_text == "Low")
+
+#graph
+ggplot(high.risk, aes(x = race)) + geom_histogram(stat = "count") + labs(title = "'High Risk'Race Distribution", x = "Race", y = "Count") +  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+One of the primary observations with COMPAS model is the sysmatic bias towards labelling African American as "high risk" in comparsion to other races. As mentioned above, white defendants are 58.5% less likely to be labelled as such. In addition, Hispanics are 80.89% less likely to be labelled as "High Risk" as well. Asians and Native Americans are not mentioned in this analysis due to the fact that they make up a small portion of the sample and the quality of results is uncertain. 
+
+##### Bias in COMPAS for Violent Recidivism
+
+```{r}
+performance.violent <- violent.subset.score.df[,-c(2,3,6,7,9,10,14,15,18,20)]
+performance.violent$score_text <- factor(performance.violent$score_text, levels = c("Low", "Medium", "High"))
+
+
+performance.violent.logit <- glm(score_text ~ ., family = "binomial", data = performance.violent)
+summary(performance.violent.logit)
+```
+
+White defendants are 55.5% less likely to receive a higher score correcting for the seriousness of their crime, previous arrests, and future criminal behavior in comparisions to African Americans. 
+
+Male defendants are 19.5% less likely to receive a higher score in comparisions to their female counterparts, holding all other variables constant. 
+
+Defendants who are under the age of 25 category are more likely to receive a higher score than the other two categories. Holding everything else constant, those who are age 25-45 are 46.4% less likely to receiving a higher score than those under 25 years old. Additionally, those older than 45 are 100% less likely to receiving a higher score. 
+
+
+
+**Our RAI**
+
+##### Bias for Nonviolent Recidivism
+
+For the sake of interpretability, we used logistic regression to calculate the bias, which had close to the same accuracy rates as our random forest. We are using the same dataframe to maintain consistent observations across comparisons. In this model, we are using recidivism as a proxy for the score_text variable that the COMPAS model is using.
+
+```{r}
+our.performance <- subset.score.df[,-c(2,3,6,7,9,10,14,15,18,20)]
+our.performance.logit <- glm(is_recid ~ ., family = "binomial", data = our.performance)
+
+summary(our.performance.logit)
+```
+White defendants are 19% less likely to receive a higher score correcting for the seriousness of their crime, previous arrests, and future criminal behavior in comparisions to African Americans. This is a very smaller likelihood in comparison to COMPAS model. 
+
+Female defendants are 30.1% more likely to receive a higher score in comparisions to their male counterparts, holding all other variables constant. Because this is not statistically significant, this indicates that there is little variability between the genders. This is larger than COMPAS model, meaning that our model's outcome is more influenced by gender. 
+
+Defendants who are under the age of 25 category are more likely to receive a higher score than the other two categories. Holding everything else constant, those who are age 25-45 are 51.8% less likely to receiving a higher score than those under 25 years old. Additionally, those older than 45 are 90% less likely to receiving a higher score. This is less in comparison to COMPAS score. 
+
+##### Bias for Violent Recidivism
+
+Even though our random forest model ended up being the best model, we chose to explore this analysis with a logistic regression for interpretibility's sake and to keep things the same across the nonviolent and violent analysis. 
+
+```{r}
+our.performance.violent <- violent.subset.score.df[,-c(2,3,6,7,9,10,14,15,17,20)]
+our.performance.violent.logit <- glm(is_violent_recid ~ ., family = "binomial", data = our.performance.violent)
+
+summary(our.performance.violent.logit)
+
+```
+White defendants are 11.9% less likely to receive a higher score correcting for the seriousness of their crime, previous arrests, and future criminal behavior in comparisions to African Americans. This is still smaller than the COMPAS model. 
+
+Male defendants are 51.4% more likely to receive a higher score in comparisions to their male counterparts, holding all other variables constant. This is vastly different than COMPAS, and indicates that our model penalizes being a male. However, this difference may be attributed to the fact that we used a logistic regression model for this analysis, which is not the optimal model for this scenario.
+
+Defendants who are under the age of 25 category are more likely to receive a higher score than the other two categories. Holding everything else constant, those who are age 25-45 are 23.3% more likely to receive a higher score than those under 25 years old. Additionally, those older than 45 are 71.1% more likely to receive a higher score. This is less in comparison to COMPAS score. 
+
+
+**6. Conclusion**
+
+In order to best predict two-year non-violent and violent recidivism, we found that the random forest models were the best models for prediction. These models were able to yield an accuracy of `r round(rf.conf$overall["Accuracy"]*100, 2)`% and `r round(rf.conf.v$overall["Accuracy"]*100, 2)`%, respectively. The most important predictors for recidivism and violent recidivism both seem to be `stay`, and `priors_count`, with `race` and `age_cat` as our second tier important variables. 
+
+While we were able to predict non-violent and violent recidivisim with a relatively high accuracy, we found that our model was biased. Our models did not predict equally across racial, age, and gender categories, which could have some negative implications if using these models to predict recidivism in future cases. 
+
+We also found that our model for predicting non-violent recidivism had a higher accuracy than the COMPAS model did. However, our model for prediciting violent recidivism did similarly to the COMPAS model. We did see some slight differences between our classifications and the COMPAS model. The COMPAS model seems to favor giving higher scores for those who are African American under the age of 25. This was the same for our models as well but to a lesser extent. While this is less than what we have seen in the COMPAS model, our model still seems to have a preference to classify as likely to recidivized to male African Africans under the age of 25. 
+
